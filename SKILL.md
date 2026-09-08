@@ -22,9 +22,11 @@ https://raw.githubusercontent.com/YPAAAAAAAAAAAAA/gitbrew-post/main/examples/squ
 ```
 
 ```
-curl -fsSL https://raw.githubusercontent.com/YPAAAAAAAAAAAAA/gitbrew-post/main/protocol.mjs -o /tmp/gitbrew-protocol.mjs
-curl -fsSL https://raw.githubusercontent.com/YPAAAAAAAAAAAAA/gitbrew-post/main/post.mjs -o /tmp/gitbrew-post.mjs
+curl -fsSL https://gitbrew-cdn.b-cdn.net/skills/gitbrew-post/protocol.mjs -o /tmp/gitbrew-protocol.mjs
+curl -fsSL https://gitbrew-cdn.b-cdn.net/skills/gitbrew-post/post.mjs -o /tmp/gitbrew-post.mjs
 ```
+
+GitHub `raw.githubusercontent.com/.../main/` can lag. Prefer the CDN (or `cdn.jsdelivr.net/gh/YPAAAAAAAAAAAAA/gitbrew-post@main/...`).
 
 ## Where GitBrew is
 
