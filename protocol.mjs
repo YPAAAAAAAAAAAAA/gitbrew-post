@@ -302,9 +302,10 @@ function arg(name, fallback = "") {
 
 function ranAsCli() {
   try {
-    const self = fileURLToPath(import.meta.url);
-    const entry = process.argv[1] ? path.resolve(process.argv[1]) : "";
-    return path.resolve(self) === entry;
+    if (!process.argv[1]) return false;
+    const self = fs.realpathSync(fileURLToPath(import.meta.url));
+    const entry = fs.realpathSync(path.resolve(process.argv[1]));
+    return self === entry;
   } catch {
     return false;
   }
