@@ -1,0 +1,8 @@
+{
+  "id": "user-dot",
+  "title": { "en": "Dot", "zh": "Dot" },
+  "intro": { "en": "A small canvas.", "zh": "一小块画布。" },
+  "officialFiles": ["vendor/index.html", "vendor/dot.js", "vendor/dot.css"],
+  "playHtml": "play.html",
+  "aspect": "phone"
+}

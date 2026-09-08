@@ -1,0 +1,8 @@
+{
+  "id": "user-tile",
+  "title": { "en": "Tile", "zh": "Tile" },
+  "intro": { "en": "A square tile.", "zh": "一块方砖。" },
+  "officialFiles": ["vendor/index.html", "vendor/tile.js", "vendor/tile.css"],
+  "playHtml": "play.html",
+  "aspect": "square"
+}
