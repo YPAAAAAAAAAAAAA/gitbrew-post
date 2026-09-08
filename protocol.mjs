@@ -9,6 +9,12 @@ import { fileURLToPath } from "node:url";
 
 export const HOST_ASPECT = { phone: "390 / 844", square: "1 / 1" };
 
+/** Official engines (three.min.js) are expected. Pack law is 20MB reachable play. */
+export const MAX_OFFICIAL_FILE_CHARS = 2_000_000;
+export const MAX_PLAY_HTML_CHARS = 2_000_000;
+export const MAX_OFFICIAL_FILES = 40;
+export const MAX_POST_CHARS = 20_000_000;
+
 const DEMOLISH = [
   /showRunner\s*\(/,
   /width:\s*100%\s*!important/,
@@ -172,9 +178,21 @@ export function validateUserPostFiles(input) {
   if (!playHtml) errors.push("invalid play html path");
   const files = input.officialFiles ?? [];
   if (files.length === 0) errors.push("no official files listed");
+  if (files.length > MAX_OFFICIAL_FILES) errors.push(`too many official files (max ${MAX_OFFICIAL_FILES})`);
   for (const f of files) {
     const rel = safeRelPath(f.path);
     if (!rel || !f.content) errors.push(`bad official file: ${f.path}`);
+    else if (f.content.length > MAX_OFFICIAL_FILE_CHARS) {
+      errors.push(`official file too large: ${f.path} (max ${MAX_OFFICIAL_FILE_CHARS} chars)`);
+    }
+  }
+  const html = input.playHtmlContent ?? "";
+  if (html.length > MAX_PLAY_HTML_CHARS) {
+    errors.push(`play html too large (max ${MAX_PLAY_HTML_CHARS} chars)`);
+  }
+  const postChars = html.length + files.reduce((n, f) => n + (f.content ? f.content.length : 0), 0);
+  if (postChars > MAX_POST_CHARS) {
+    errors.push(`play payload too large (max ${MAX_POST_CHARS} chars)`);
   }
 
   const htmlFiles = files.filter((f) => /\.html?$/i.test(f.path) && safeRelPath(f.path));
@@ -193,7 +211,6 @@ export function validateUserPostFiles(input) {
     if (nonWs(f.content) < min) errors.push(`official file too thin: ${f.path}`);
   }
 
-  const html = input.playHtmlContent ?? "";
   if (!html.trim()) errors.push("missing play html");
 
   const blobs = [html, ...files.map((f) => f.content)];

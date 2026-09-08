@@ -66,7 +66,7 @@ In **this** repo, one folder (the `--dir`). Same shape for a canvas toy, a WebGL
 }
 ```
 
-Limits: play HTML ≤ 800k chars; each official file ≤ 400k chars; ≤ 40 official files. Images/audio/wasm: keep them relative under `vendor/` and referenced by basename from play HTML (utf8 text files — inline small assets as data URIs when the official demo already does).
+Limits: play HTML ≤ 2M chars; each official file ≤ 2M chars (official `three.min.js` is expected); all play files together ≤ 20M; ≤ 40 official files. Images/audio/wasm: keep them relative under `vendor/` and referenced by basename from play HTML (utf8 text files — inline small assets as data URIs when the official demo already does).
 
 Dock sibling (when the official demo has a panel):
 
