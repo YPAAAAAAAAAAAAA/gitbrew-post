@@ -15,3 +15,5 @@ node /tmp/gitbrew-protocol.mjs check --dir ./the-post-folder
 ```
 
 `GITBREW_URL` is the GitBrew that has `/api/trpc/creators.publish`. This repo is the pack, not GitBrew. Do not pass these GitHub URLs to `post.mjs --url`.
+
+Cover: put `cover.webp` + muted `cover.mp4` (390×844) next to `play.html`. `post.mjs` ships them; they are not `officialFiles`. Missing cover falls back to the GitHub OG of their repo.

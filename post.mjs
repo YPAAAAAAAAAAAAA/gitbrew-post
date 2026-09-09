@@ -108,8 +108,10 @@ async function main() {
   if (cmd === "publish") {
     const dir = arg("dir");
     const repo = arg("repo");
-    if (!dir || !repo) die("publish needs --dir and --repo owner/name");
+    if (!dir) die("publish needs --dir");
     const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    const githubRepo = repo || manifest.githubRepo;
+    if (!githubRepo) die("publish needs --repo owner/name (or manifest.githubRepo)");
     const playHtml = manifest.playHtml || "play.html";
     const playPath = join(dir, playHtml);
     if (!existsSync(playPath)) die(`missing ${playHtml}`, 1);
@@ -120,15 +122,19 @@ async function main() {
       if (!existsSync(fp)) die(`missing official file ${p}`, 1);
       return { path: p, content: readFileSync(fp, "utf8") };
     });
+    const stillPath = ["cover.webp", "cover.png"].map((n) => join(dir, n)).find((p) => existsSync(p));
+    const loopPath = join(dir, "cover.mp4");
     const posted = await trpc("creators.publish", {
       id: manifest.id,
       title: manifest.title,
       intro: manifest.intro,
-      githubRepo: repo,
+      githubRepo,
       playHtml,
       playHtmlContent: readFileSync(playPath, "utf8"),
       officialFiles,
       aspect: manifest.aspect === "square" ? "square" : "phone",
+      ...(stillPath ? { coverStill: readFileSync(stillPath).toString("base64") } : {}),
+      ...(existsSync(loopPath) ? { coverLoop: readFileSync(loopPath).toString("base64") } : {}),
     });
     console.log(JSON.stringify(posted, null, 2));
     return;

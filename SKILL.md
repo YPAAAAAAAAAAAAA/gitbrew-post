@@ -42,7 +42,7 @@ Tap-in plays the **official demo as the official demo**. A bright canvas, `_read
 
 GitBrew `validateUserPostFiles` is the lock. Run it locally, then POST. If publish returns `BAD_REQUEST`, the message is a protocol error — fix the house, do not bypass.
 
-Do not land ids in GitBrew `USER_POSTS` source or `SANDBOX_ALLOWLIST`. Publish writes `/user-play/u-{login}-{id}/`. Cover is the GitHub OG of **their** repo. Host iframe **is** the aspect box (phone `390 / 844` island `max-height: 120vw`; square `1 / 1` island `max-height: 100vw`). `fill` is EXE HUD only — do not stretch the play page to 100vh to "fill the phone".
+Do not land ids in GitBrew `USER_POSTS` source or `SANDBOX_ALLOWLIST`. Publish writes `/user-play/u-{login}-{id}/`. Cover is **390×844** `cover.webp` (png ok) + muted `cover.mp4` in the house folder — `post.mjs` ships them; they are **not** `officialFiles`. Missing cover falls back to the GitHub OG of **their** repo. Host iframe **is** the aspect box (phone `390 / 844` island `max-height: 120vw`; square `1 / 1` island `max-height: 100vw`). `fill` is EXE HUD only — do not stretch the play page to 100vh to "fill the phone".
 
 ## House (whatever project)
 
@@ -64,9 +64,12 @@ In **this** repo, one folder (the `--dir`). Same shape for a canvas toy, a WebGL
   "intro": { "en": "…", "zh": "…" },
   "officialFiles": ["vendor/index.html", "vendor/dot.js", "vendor/dot.css"],
   "playHtml": "play.html",
-  "aspect": "phone"
+  "aspect": "phone",
+  "githubRepo": "theirlogin/theirrepo"
 }
 ```
+
+Put `cover.webp` + muted `cover.mp4` (both **390×844**, no controls) next to `play.html`. Do not list them in `officialFiles`.
 
 Limits: play HTML ≤ 2M chars; each official file ≤ 2M chars (official `three.min.js` is expected); all play files together ≤ 20M; ≤ 40 official files. Images/audio/wasm: keep them relative under `vendor/` and referenced by basename from play HTML (utf8 text files — inline small assets as data URIs when the official demo already does).
 
@@ -136,7 +139,7 @@ Fail closed (do not copy): a stub `<canvas>` plus `var x=1`, a `showRunner` wrap
 node /tmp/gitbrew-protocol.mjs check --dir ./the-post-folder
 ```
 
-Must be `"ok": true`. Then `githubRepo` must be `owner/name` **this GitHub user owns**. Naming a login is not enough — you need their `GITHUB_TOKEN`.
+Must be `"ok": true`. Then `githubRepo` must be `owner/name` **this GitHub user owns** (`--repo` or `manifest.githubRepo`). Naming a login is not enough — you need their `GITHUB_TOKEN`.
 
 ```
 GITHUB_TOKEN=… node /tmp/gitbrew-post.mjs publish \
