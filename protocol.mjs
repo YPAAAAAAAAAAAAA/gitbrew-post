@@ -2,9 +2,13 @@
 /**
  * Sandbox-green lock for creator posts. Same gate GitBrew runs on publish.
  *   node protocol.mjs check --dir ./the-post-folder
+ *
+ * Play-host paging (hub-ranked queue, rotate around the opened post, GitHub
+ * preload never key) lives in `.claude/skills/gitbrew-sandbox`, not here.
  */
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export const HOST_ASPECT = { phone: "390 / 844", square: "1 / 1" };
@@ -12,13 +16,19 @@ export const HOST_ASPECT = { phone: "390 / 844", square: "1 / 1" };
 /** Official engines (three.min.js) are expected. Pack law is 20MB reachable play. */
 export const MAX_OFFICIAL_FILE_CHARS = 2_000_000;
 export const MAX_PLAY_HTML_CHARS = 2_000_000;
-export const MAX_OFFICIAL_FILES = 40;
+export const MAX_OFFICIAL_FILES = 80;
 export const MAX_POST_CHARS = 20_000_000;
+export const MAX_INTRO_CHARS = 500;
+export const MIN_COVER_FPS = 24;
+export const COVER_WIDTH = 390;
+export const COVER_HEIGHT = 844;
 
 const DEMOLISH = [
   /showRunner\s*\(/,
   /width:\s*100%\s*!important/,
   /function\s+gbRebuildHud/,
+  /args\.seg\s*=\s*\d+/,
+  /\.filter\s*=\s*function\s*\(\)\s*\{\s*\}/,
 ];
 
 const REMOTE_FONT = /fonts\.googleapis|fonts\.gstatic|use\.typekit|kit\.fontawesome/i;
@@ -154,6 +164,56 @@ function pushComposition(html, joined, _aspect, errors) {
   }
 }
 
+function pushSlowReady(html, joined, errors) {
+  const hasRoot = /id\s*=\s*["']root["']/i.test(joined) || /getElementById\(\s*["']root["']\s*\)/.test(joined);
+  if (!hasRoot) return;
+  const hasProbe =
+    /children\.length\s*>\s*0/.test(joined) ||
+    /gb-winxp-ready/.test(joined) ||
+    /\/sandbox\/_ready(?:\.v\d+)?\.js/.test(html);
+  if (!hasProbe) {
+    errors.push("slow-compile-ready: #root toys must wait for children/paint, not empty root or gray canvas");
+  }
+}
+
+
+/** Stage must fill the phone host so `_ready.js` can fire without the 14s web-fallback. */
+function pushStageReady(html, joined, errors) {
+  const stageCss =
+    /(?:html\s*,\s*body|body)\s*\{[^}]{0,220}height:\s*100%/i.test(joined) &&
+    /overflow:\s*hidden/i.test(joined);
+  const fullBleedCss =
+    /(?:canvas|#stage|#gl|#scene|#root)\s*\{[^}]{0,280}(?:inset:\s*0|width:\s*100%|height:\s*100%|width:\s*100vw|height:\s*100vh)/i.test(
+      joined,
+    );
+  const resizes =
+    /(?:innerWidth|clientWidth|visualViewport)/.test(joined) &&
+    /(?:innerHeight|clientHeight)/.test(joined) &&
+    /(?:\.width\s*=|setSize\s*\()/.test(joined);
+  // Fixed bitmap attrs under ~200px with no full-bleed CSS and no resize → host never paints ready.
+  const tinyAttrs = [...html.matchAll(/<canvas\b([^>]*)>/gi)].some((m) => {
+    const a = m[1];
+    const w = /\bwidth\s*=\s*["']?(\d+)/i.exec(a);
+    const h = /\bheight\s*=\s*["']?(\d+)/i.exec(a);
+    if (!w || !h) return false;
+    return Number(w[1]) > 0 && Number(w[1]) < 200 && Number(h[1]) > 0 && Number(h[1]) < 200;
+  });
+  const tinyAssign = /(?:canvas|#stage|#gl)[^;]{0,40}\.width\s*=\s*(\d+)\s*;[^;]{0,80}\.height\s*=\s*(\d+)/i.exec(
+    joined.replace(/\n/g, " "),
+  );
+  const tinyJs =
+    tinyAssign && Number(tinyAssign[1]) < 200 && Number(tinyAssign[2]) < 200 && !resizes;
+  if ((tinyAttrs || tinyJs) && !(fullBleedCss && (stageCss || resizes))) {
+    errors.push(
+      "tiny-stage: stage must fill the phone (CSS full-bleed or resize to innerWidth/innerHeight). A small fixed canvas never passes ready and hits the 14s fallback — reject, do not publish",
+    );
+  }
+  if (!stageCss) {
+    errors.push("composition-fill");
+  }
+}
+
+
 function pushRemote(html, errors) {
   const links = [...html.matchAll(/<link\b[^>]*>/gi)];
   if (links.some((m) => /stylesheet/i.test(m[0]) && /href=["']https?:/i.test(m[0]))) {
@@ -166,6 +226,31 @@ function pushRemote(html, errors) {
   }
   if (REMOTE_FONT.test(html)) errors.push("remote font");
   if (REMOTE_WIDGET.test(html)) errors.push("remote widget");
+}
+
+/**
+ * A post IS a repo's playable artifact: the post id is the repo name,
+ * slugified. A manifest that names a different repo is a provenance lie
+ * (wrong README, wrong link) and is rejected. Keep in sync with
+ * postSlugFromRepoName in server/routers.ts and Posts.tsx.
+ */
+export function postSlugFromRepoName(name) {
+  return String(name ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32)
+    .replace(/-+$/, "");
+}
+
+function repoNameOf(repo) {
+  const raw = String(repo ?? "")
+    .trim()
+    .replace(/^https?:\/\/(github|gitlab)\.com\//i, "")
+    .replace(/\.git$/, "")
+    .replace(/\/+$/, "");
+  const parts = raw.split("/");
+  return parts.length >= 2 ? parts[parts.length - 1] : "";
 }
 
 export function validateUserPostFiles(input) {
@@ -235,6 +320,8 @@ export function validateUserPostFiles(input) {
     const joined = [html, ...files.map((f) => f.content)].join("\n");
     pushRatio(joined, html, aspect, errors);
     pushComposition(html, joined, aspect, errors);
+    pushSlowReady(html, joined, errors);
+    pushStageReady(html, joined, errors);
     if (/(?:#scene|canvas)\s*\{[^}]{0,120}display:\s*none/i.test(html)) {
       errors.push("hide-stage");
     }
@@ -262,6 +349,11 @@ export function validateUserPostFiles(input) {
     (input.title?.zh?.length ?? 0) > 0 &&
     (input.title?.zh?.length ?? 0) <= 42;
   if (!titleOk) errors.push("title must be bilingual and ≤42");
+  const introEn = input.intro?.en ?? "";
+  const introZh = input.intro?.zh ?? "";
+  if (introEn.length > MAX_INTRO_CHARS || introZh.length > MAX_INTRO_CHARS) {
+    errors.push(`intro must be ≤${MAX_INTRO_CHARS} per language`);
+  }
 
   const unique = [...new Set(errors)];
   return { ok: unique.length === 0, id, pasted: unique.length === 0, errors: unique };
@@ -284,14 +376,71 @@ export function validateUserPost(dir) {
     path: rel,
     content: fs.existsSync(path.join(dir, rel)) ? fs.readFileSync(path.join(dir, rel), "utf8") : "",
   }));
-  return validateUserPostFiles({
+  const checked = validateUserPostFiles({
     id: manifest.id,
     title: manifest.title,
+    intro: manifest.intro,
     playHtml: manifest.playHtml,
     playHtmlContent: fs.existsSync(playPath) ? fs.readFileSync(playPath, "utf8") : "",
     officialFiles,
     aspect: manifest.aspect,
   });
+  const checking = process.argv[2] === "check";
+  const hasLoop = fs.existsSync(path.join(dir, "cover.mp4"));
+  const hasStill = ["cover.webp", "cover.png"].some((n) => fs.existsSync(path.join(dir, n)));
+  const coverErrors = checking || hasLoop || hasStill ? validateCoverFiles(dir) : [];
+  const errors = [...checked.errors, ...coverErrors];
+  const repo = manifest.githubRepo ?? manifest.gitlabRepo;
+  if (repo) {
+    const want = postSlugFromRepoName(repoNameOf(repo));
+    if (want && manifest.id !== want) {
+      errors.push(`post id must be the repo name ("${want}")`);
+    }
+  }
+  const unique = [...new Set(errors)];
+  return { ok: unique.length === 0, id: checked.id, pasted: unique.length === 0, errors: unique };
+}
+
+function probeVideo(file) {
+  const r = spawnSync(
+    "ffprobe",
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "json", file],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  try {
+    const stream = JSON.parse(r.stdout || "{}").streams?.[0];
+    if (!stream) return null;
+    const [a, b] = String(stream.avg_frame_rate || "0/1").split("/").map(Number);
+    const fps = b ? a / b : a || 0;
+    return { width: Number(stream.width) || 0, height: Number(stream.height) || 0, fps };
+  } catch {
+    return null;
+  }
+}
+
+/** Cover is the STAGE only: 390×844, ≥24fps, no GitBrew chrome (back, title, rail). */
+export function validateCoverFiles(dir) {
+  const errors = [];
+  const loop = path.join(dir, "cover.mp4");
+  const still = ["cover.webp", "cover.png"].map((n) => path.join(dir, n)).find((p) => fs.existsSync(p));
+  if (!still) errors.push("cover-still missing: cover.webp (or cover.png) must be the 390×844 stage, no GitBrew chrome");
+  if (!fs.existsSync(loop)) {
+    errors.push("cover-loop missing: cover.mp4 must be a 390×844 ≥24fps stage recording, no GitBrew chrome");
+    return errors;
+  }
+  const meta = probeVideo(loop);
+  if (!meta) {
+    errors.push("cover-loop unreadable: install ffprobe or record a real mp4");
+    return errors;
+  }
+  if (meta.width !== COVER_WIDTH || meta.height !== COVER_HEIGHT) {
+    errors.push(`cover-loop must be ${COVER_WIDTH}×${COVER_HEIGHT} (got ${meta.width}×${meta.height}) — crop the stage, not the GitBrew chrome`);
+  }
+  if (meta.fps < MIN_COVER_FPS) {
+    errors.push(`cover-loop fps ${meta.fps.toFixed(1)} < ${MIN_COVER_FPS} — record the live stage, not a flipbook`);
+  }
+  return errors;
 }
 
 function arg(name, fallback = "") {
