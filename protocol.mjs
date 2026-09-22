@@ -22,6 +22,8 @@ export const MAX_INTRO_CHARS = 500;
 export const MIN_COVER_FPS = 24;
 export const COVER_WIDTH = 390;
 export const COVER_HEIGHT = 844;
+/** Cloud publish gate: playable-ready must fire within this many ms. */
+export const MAX_READY_MS = 2000;
 
 const DEMOLISH = [
   /showRunner\s*\(/,
@@ -172,46 +174,10 @@ function pushSlowReady(html, joined, errors) {
     /gb-winxp-ready/.test(joined) ||
     /\/sandbox\/_ready(?:\.v\d+)?\.js/.test(html);
   if (!hasProbe) {
-    errors.push("slow-compile-ready: #root toys must wait for children/paint, not empty root or gray canvas");
+    errors.push("ready-hook: #root posts must include /sandbox/_ready.js (cloud gate measures ready ≤ MAX_READY_MS)");
   }
 }
 
-
-/** Stage must fill the phone host so `_ready.js` can fire without the 14s web-fallback. */
-function pushStageReady(html, joined, errors) {
-  const stageCss =
-    /(?:html\s*,\s*body|body)\s*\{[^}]{0,220}height:\s*100%/i.test(joined) &&
-    /overflow:\s*hidden/i.test(joined);
-  const fullBleedCss =
-    /(?:canvas|#stage|#gl|#scene|#root)\s*\{[^}]{0,280}(?:inset:\s*0|width:\s*100%|height:\s*100%|width:\s*100vw|height:\s*100vh)/i.test(
-      joined,
-    );
-  const resizes =
-    /(?:innerWidth|clientWidth|visualViewport)/.test(joined) &&
-    /(?:innerHeight|clientHeight)/.test(joined) &&
-    /(?:\.width\s*=|setSize\s*\()/.test(joined);
-  // Fixed bitmap attrs under ~200px with no full-bleed CSS and no resize → host never paints ready.
-  const tinyAttrs = [...html.matchAll(/<canvas\b([^>]*)>/gi)].some((m) => {
-    const a = m[1];
-    const w = /\bwidth\s*=\s*["']?(\d+)/i.exec(a);
-    const h = /\bheight\s*=\s*["']?(\d+)/i.exec(a);
-    if (!w || !h) return false;
-    return Number(w[1]) > 0 && Number(w[1]) < 200 && Number(h[1]) > 0 && Number(h[1]) < 200;
-  });
-  const tinyAssign = /(?:canvas|#stage|#gl)[^;]{0,40}\.width\s*=\s*(\d+)\s*;[^;]{0,80}\.height\s*=\s*(\d+)/i.exec(
-    joined.replace(/\n/g, " "),
-  );
-  const tinyJs =
-    tinyAssign && Number(tinyAssign[1]) < 200 && Number(tinyAssign[2]) < 200 && !resizes;
-  if ((tinyAttrs || tinyJs) && !(fullBleedCss && (stageCss || resizes))) {
-    errors.push(
-      "tiny-stage: stage must fill the phone (CSS full-bleed or resize to innerWidth/innerHeight). A small fixed canvas never passes ready and hits the 14s fallback — reject, do not publish",
-    );
-  }
-  if (!stageCss) {
-    errors.push("composition-fill");
-  }
-}
 
 
 function pushRemote(html, errors) {
@@ -321,7 +287,6 @@ export function validateUserPostFiles(input) {
     pushRatio(joined, html, aspect, errors);
     pushComposition(html, joined, aspect, errors);
     pushSlowReady(html, joined, errors);
-    pushStageReady(html, joined, errors);
     if (/(?:#scene|canvas)\s*\{[^}]{0,120}display:\s*none/i.test(html)) {
       errors.push("hide-stage");
     }

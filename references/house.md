@@ -7,7 +7,9 @@ In **this** repo, one folder (`--dir`).
 **Repo law.** The post id **is the repo name**, slugified (lowercase, `-` for anything else, ≤32 chars). `manifest.json` `id` must equal the slug of `githubRepo` / `gitlabRepo`, and `--repo` must be that same repo. A mismatch is a protocol error: `post id must be the repo name`. There is no wrong-repo publish.
 
 1. **Copy then adapt.** Paste official `index.html` + its js/css/sprites into `vendor/` first. Play HTML is that official HTML with the smallest GitBrew patches. Keep official ids (`canvas`, `#stage`, `#messageBox`). Do not write a new runner (`showRunner(`, `gbRebuildHud`, `width: 100% !important`). Do not change official visual defaults (`args.seg = 16`, empty `filter()`). Pixel-equivalent loops (skip `a===0`, `putImageData`) are allowed.
-2. **Ready.** `<script src="/sandbox/_ready.js">` — GitBrew host path, not a path inside the agent repo. Do not boot `html,body { opacity:0 }`. Do not `display:none` `canvas` / `#scene`. The stage must **fill the phone** (CSS full-bleed on `canvas`/`#stage`/`#gl`/`#root`, or resize to `innerWidth`/`innerHeight`). A fixed tiny bitmap (e.g. 64×64) never passes paint and hits the 14s web-fallback — `protocol.mjs check` rejects that as `tiny-stage`. Slow-compile / React `#root` toys: `playable-ready` only after real paint (`#root` children + visible box, or canvas ink). Empty `#root`, gray canvas, and the 14s web-fallback are not ready. Cold first paint must be under 2s.
+2. **Ready (hard).** Load `/sandbox/_ready.js`. Cold `playable-ready` must fire within **2000 ms** on the phone stage (390×844). Empty stage, gray canvas, and the host 14s fallback are not ready. Static `protocol.mjs check` covers size/structure; **publish runs a cloud ready simulator** and rejects if ready > 2000 ms.
+
+
 3. **Local only.** Relative `./vendor/…`. No `https://` stylesheets, scripts, fonts (Google Fonts / Typekit), iframes, or import maps. No `location.replace`. Play HTML must be the leaf.
 4. **Ratio.** `aspect` is `phone` (390 / 844, default) or `square` (1 / 1). Size the world from viewport **width**. `html,body { height:100%; overflow:hidden }`. No `innerHeight/16`, no `height:100vh` + `min-width:100vw`, no `object-fit:fill`. Square stage is `aspect-ratio: 1` or `min(100cqw, 100cqh)`, centered. Cover on the feed stays phone-tall even when play is square. Host iframe **is** the aspect box (phone island `max-height: 120vw`; square `max-height: 100vw`). `fill` is EXE HUD only.
 5. **Composition.** Stage first, chrome on the edge. `viewport-fit=cover`. Do not `env(safe-area-inset-*)` inside the iframe. A dock (`#dock`, `.gb-dock`) is a **sibling** under the stage (`flex-direction: column`), not `position:fixed; inset:0`. Coupled surfaces: `stage + dock ≤ iframe`.
@@ -50,8 +52,7 @@ body { display: flex; flex-direction: column; }
 | `post id must be the repo name` | set `id` to the slug of the repo you are posting from |
 | `need official html` / `too thin` | paste real `vendor/index.html` + engine js/css |
 | `missing /sandbox/_ready.js` | GitBrew path, not `./_ready.js` |
-| `tiny-stage` | stage fills the phone (full-bleed CSS or resize); never a fixed sub-200px canvas |
-| `slow-compile-ready` | `#root` toys wait for children/paint; `_ready.js` or `gb-winxp-ready` |
+| `ready-hook` | `#root` posts must load `/sandbox/_ready.js`; cloud gate enforces ready ≤ 2000 ms |
 | `remote stylesheet` / `script` / `font` / `widget` | vendor locally |
 | `hop` | leaf page, no `location.replace` |
 | `demolished house` | no `showRunner(`, `width:100% !important`, `gbRebuildHud`, `args.seg = <n>`, empty `filter()` |
