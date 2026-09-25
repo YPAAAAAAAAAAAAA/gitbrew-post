@@ -6,6 +6,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { PREVIEW_DEVICE_TAPIN_MARKER } from "./protocol.mjs";
 
 function arg(name, fallback = "") {
   const i = process.argv.indexOf(`--${name}`);
@@ -44,7 +45,7 @@ function isPackHost(raw) {
 
 const cmd = process.argv[2];
 const url = (arg("url") || process.env.GITBREW_URL || "").replace(/\/$/, "");
-const token = arg("token") || process.env.GITHUB_TOKEN || "";
+const token = arg("token") || process.env.GITBREW_TOKEN || process.env.GITHUB_TOKEN || "";
 if (!url) die("Pass --url or GITBREW_URL — the GitBrew origin this skill was fetched from.");
 if (isLoopback(url) && process.env.GITBREW_ALLOW_LOCAL !== "1") {
   die("Refusing localhost. GITBREW_URL is the live GitBrew, not the agent's machine. Set GITBREW_ALLOW_LOCAL=1 only if you are that server.");
@@ -52,11 +53,11 @@ if (isLoopback(url) && process.env.GITBREW_ALLOW_LOCAL !== "1") {
 if (isPackHost(url)) {
   die("That URL is the skill pack, not GitBrew. Pass --url of the GitBrew that has /api/trpc.");
 }
-if (!token) die("Set GITHUB_TOKEN (the creator's GitHub token, not a GitBrew password).");
+if (!token) die("Set GITBREW_TOKEN (from gitbrew.ai → Me → Generate token) or GITHUB_TOKEN.");
 
 async function gitbrewFetch(href, init) {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 20_000);
+  const timer = setTimeout(() => ac.abort(), 120_000);
   try {
     return await fetch(href, { ...init, signal: ac.signal });
   } catch (e) {
@@ -122,21 +123,52 @@ async function main() {
       if (!existsSync(fp)) die(`missing official file ${p}`, 1);
       return { path: p, content: readFileSync(fp, "utf8") };
     });
+    const proofPath = join(dir, "SKILL_PROOF.md");
+    if (!existsSync(proofPath)) die("skill-proof missing: need SKILL_PROOF.md in --dir (read gitbrew-post skill)", 1);
+    const skillProof = readFileSync(proofPath, "utf8");
+    if (skillProof.replace(/\s+/g, "").length < 120) die("skill-proof empty: SKILL_PROOF.md too thin", 1);
     const stillPath = ["cover.webp", "cover.png"].map((n) => join(dir, n)).find((p) => existsSync(p));
     const loopPath = join(dir, "cover.mp4");
-    const posted = await trpc("creators.publish", {
-      id: manifest.id,
-      title: manifest.title,
-      intro: manifest.intro,
-      githubRepo,
-      playHtml,
-      playHtmlContent: readFileSync(playPath, "utf8"),
-      officialFiles,
-      aspect: manifest.aspect === "square" ? "square" : "phone",
-      ...(stillPath ? { coverStill: readFileSync(stillPath).toString("base64") } : {}),
-      ...(existsSync(loopPath) ? { coverLoop: readFileSync(loopPath).toString("base64") } : {}),
-    });
-    console.log(JSON.stringify(posted, null, 2));
+    let posted;
+    try {
+      posted = await trpc("creators.publish", {
+        id: manifest.id,
+        title: manifest.title,
+        intro: manifest.intro,
+        githubRepo,
+        playHtml,
+        playHtmlContent: readFileSync(playPath, "utf8"),
+        officialFiles,
+        skillProof,
+        aspect: manifest.aspect === "square" ? "square" : "phone",
+        coverStill: (() => {
+          if (!stillPath) die("cover-still missing: need cover.webp or cover.png (390×844)", 1);
+          return readFileSync(stillPath).toString("base64");
+        })(),
+        coverLoop: (() => {
+          if (!existsSync(loopPath)) die("cover-loop missing: need cover.mp4 (390×844 ≥24fps)", 1);
+          return readFileSync(loopPath).toString("base64");
+        })(),
+      });
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      // Already JEV:NO multiline from hub — print as-is for the agent.
+      if (msg.startsWith("JEV:")) die(msg, 1);
+      die(msg, 1);
+    }
+    const postId = posted && posted.id ? posted.id : "";
+    const jevMsg = posted && posted.jevMessage ? String(posted.jevMessage) : "";
+    if (jevMsg) console.log(jevMsg);
+    else if (posted && posted.jev && posted.jev.ok) console.log("JEV:YES");
+    if (posted && posted.jev && Array.isArray(posted.jev.checklist)) {
+      for (const u of posted.jev.checklist) {
+        if (u.status === "fail") {
+          for (const r of u.reasons || ["failed"]) console.log(`- [${u.id}] ${r}`);
+        }
+      }
+    }
+    // Preview URL = protocol PREVIEW_DEVICE_TAPIN_MARKER. Verify: node protocol.mjs check-preview --url <preview>
+    console.log(JSON.stringify({ ...posted, preview: postId ? `${url}/preview/${postId}` : undefined, previewHost: PREVIEW_DEVICE_TAPIN_MARKER }, null, 2));
     return;
   }
   if (cmd === "edit") {
@@ -160,7 +192,14 @@ async function main() {
     console.log(JSON.stringify(page, null, 2));
     return;
   }
-  die("usage: node post.mjs publish|edit|mine ...");
+  if (cmd === "delete") {
+    const postId = arg("post");
+    if (!postId) die("delete needs --post u-login-slug");
+    const out = await trpc("creators.delete", { postId });
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+  die("usage: node post.mjs publish|edit|mine|delete ...");
 }
 
 main().catch((e) => die(String(e && e.message ? e.message : e), 1));

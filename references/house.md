@@ -11,7 +11,7 @@ In **this** repo, one folder (`--dir`).
 
 
 3. **Local only.** Relative `./vendor/…`. No `https://` stylesheets, scripts, fonts (Google Fonts / Typekit), iframes, or import maps. No `location.replace`. Play HTML must be the leaf.
-4. **Ratio.** `aspect` is `phone` (390 / 844, default) or `square` (1 / 1). Size the world from viewport **width**. `html,body { height:100%; overflow:hidden }`. No `innerHeight/16`, no `height:100vh` + `min-width:100vw`, no `object-fit:fill`. Square stage is `aspect-ratio: 1` or `min(100cqw, 100cqh)`, centered. Cover on the feed stays phone-tall even when play is square. Host iframe **is** the aspect box (phone island `max-height: 120vw`; square `max-height: 100vw`). `fill` is EXE HUD only.
+4. **Ratio.** `aspect` is `phone` (390 / 844, default) or `square` (1 / 1). Size the world from viewport **width**. `html,body { height:100%; overflow:hidden }`. No `innerHeight/16`, no `height:100vh` + `min-width:100vw`, no `object-fit:fill`. Square stage is `aspect-ratio: 1` or `min(100cqw, 100cqh)`, centered. Cover on the feed stays phone-tall even when play is square. Host iframe **is** the aspect box (phone island `max-height: 120vw` = `PLAY_ISLAND_VW` 1.2; square `max-height: 100vw`). **Hard skill rule — machine-enforced** by `protocol.mjs` / JEV as `area-limit`. `fill` is EXE HUD only.
 5. **Composition.** Stage first, chrome on the edge. `viewport-fit=cover`. Do not `env(safe-area-inset-*)` inside the iframe. A dock (`#dock`, `.gb-dock`) is a **sibling** under the stage (`flex-direction: column`), not `position:fixed; inset:0`. Coupled surfaces: `stage + dock ≤ iframe`.
 6. **Titles.** `id` is the repo name slugified (`[a-z0-9-]`, 2–32 — see Repo law). Titles bilingual, 1–42 each = the **project name**.
 
@@ -31,7 +31,7 @@ In **this** repo, one folder (`--dir`).
 
 GitLab house: same file, `"gitlabRepo": "theirlogin/theirrepo"` instead of `githubRepo`.
 
-Put `cover.webp` + muted `cover.mp4` (both **390×844**, **≥24fps**, no controls) next to `play.html`. Do not list them in `officialFiles`. Cover is the **stage bitmap only**. No GitBrew back chevron, no title, no like/save/share rail, no phone chrome. Missing cover falls back to the GitHub OG of **their** repo. `intro` ≤500 characters per language.
+Put `cover.webp` (or `cover.png`) + muted `cover.mp4` (both **390×844**, **≥24fps**, no controls) next to `play.html`. Do not list them in `officialFiles`. Cover is the **stage bitmap only**. No GitBrew back chevron, no title, no like/save/share rail, no phone chrome. **Covers are required** — publish rejects missing or blank covers (no GitHub OG fallback). `intro` ≤500 characters per language.
 
 Limits: play HTML ≤ 2M chars; each official file ≤ 2M chars; all play files together ≤ 20M; ≤ 80 official files.
 
@@ -44,7 +44,7 @@ body { display: flex; flex-direction: column; }
 #dock { flex: 0 0 auto; }
 ```
 
-`protocol.mjs check` must print `"ok": true`. Fail closed:
+Required house artifact: **`SKILL_PROOF.md`** (coding agent proves they read gitbrew-post skill — ready, local vendor, 120vw island, composition). `protocol.mjs check` must print `"ok": true`. Publish returns **JEV:YES** or **JEV:NO** (with every reason). Fail closed:
 
 | error | fix |
 | --- | --- |

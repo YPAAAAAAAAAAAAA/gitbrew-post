@@ -2,13 +2,11 @@
 /**
  * Sandbox-green lock for creator posts. Same gate GitBrew runs on publish.
  *   node protocol.mjs check --dir ./the-post-folder
- *
- * Play-host paging (hub-ranked queue, rotate around the opened post, GitHub
- * preload never key) lives in `.claude/skills/gitbrew-sandbox`, not here.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 export const HOST_ASPECT = { phone: "390 / 844", square: "1 / 1" };
@@ -22,15 +20,552 @@ export const MAX_INTRO_CHARS = 500;
 export const MIN_COVER_FPS = 24;
 export const COVER_WIDTH = 390;
 export const COVER_HEIGHT = 844;
-/** Cloud publish gate: playable-ready must fire within this many ms. */
+
+/** Max ms from navigation to playable-ready (hub ready unit). */
 export const MAX_READY_MS = 2000;
+
+/** Same number as client `PLAY_ISLAND_VW` — phone play island max-height / width. */
+export const PLAY_ISLAND_VW = 1.2;
+/** Square island max-height / width (host `max-height: 100vw`). */
+export const SQUARE_ISLAND_VW = 1.0;
+/** Relative tolerance for island height checks (~1%). */
+export const PLAY_ISLAND_TOLERANCE = 0.01;
+
+export function playIslandVw(aspect) {
+  return parseAspect(aspect) === "square" ? SQUARE_ISLAND_VW : PLAY_ISLAND_VW;
+}
+
+/** Max play-island height in CSS px for a given width (protocol / app SoT). */
+export function maxPlayIslandHeight(width, aspect = "phone") {
+  const w = Number(width);
+  if (!(w > 0)) return 0;
+  return playIslandVw(aspect) * w;
+}
+
+/**
+ * Assert play or preview-host island size respects PLAY_ISLAND_VW.
+ * Full-glass fill (height ≈ glassHeight ≫ island max) fails.
+ * @returns {{ ok: true, maxHeight: number } | { ok: false, error: string, maxHeight: number }}
+ */
+export function checkPlayIslandSize(input) {
+  const width = Number(input?.width);
+  const height = Number(input?.height);
+  const aspect = parseAspect(input?.aspect);
+  const glassHeight = input?.glassHeight != null ? Number(input.glassHeight) : undefined;
+  const maxHeight = maxPlayIslandHeight(width, aspect);
+  const limit = maxHeight * (1 + PLAY_ISLAND_TOLERANCE);
+  const vw = playIslandVw(aspect);
+  const label = aspect === "square" ? "100vw" : `${PLAY_ISLAND_VW * 100}vw`;
+  if (!(width > 0) || !(height >= 0) || Number.isNaN(height)) {
+    return {
+      ok: false,
+      maxHeight,
+      error: `area-limit: invalid play island size ${width}x${height}`,
+    };
+  }
+  if (height > limit) {
+    return {
+      ok: false,
+      maxHeight,
+      error: `area-limit: play island ${Math.round(width)}x${Math.round(height)} exceeds ${label} (max ${maxHeight.toFixed(1)}px, PLAY_ISLAND_VW=${vw})`,
+    };
+  }
+  if (
+    glassHeight != null &&
+    Number.isFinite(glassHeight) &&
+    glassHeight > maxHeight * (1 + PLAY_ISLAND_TOLERANCE) &&
+    height >= glassHeight * (1 - PLAY_ISLAND_TOLERANCE)
+  ) {
+    return {
+      ok: false,
+      maxHeight,
+      error: `area-limit: play fills glass ${Math.round(glassHeight)}px > island max ${maxHeight.toFixed(1)}px (${label})`,
+    };
+  }
+  return { ok: true, maxHeight };
+}
+
+/** Preview/host island CSS px: min(glassH, round(width * PLAY_ISLAND_VW)). */
+export function previewIslandHeight(logicalW, logicalH, aspect = "phone") {
+  const maxH = maxPlayIslandHeight(logicalW, aspect);
+  return Math.min(Number(logicalH) || 0, Math.round(maxH));
+}
+
+/**
+ * Static gate on preview-host HTML or server source.
+ *
+ * 3js phone + in-app tap-in chrome + play.html in a 120vw island.
+ * Not the GitBrew app. Not a full-OLED iframe. No CylinderGeometry.
+ */
+export function assertPreviewHostAreaLimit(html) {
+  const errors = [];
+  const src = String(html ?? "");
+  if (/preview-fullbleed-tapin-v1/.test(src) && !/WebGLRenderer|THREE\.Scene|GridHelper|3js-device/i.test(src)) {
+    errors.push("area-limit: full-bleed-only /preview is rejected — need 3js device + tap-in chrome");
+    return errors;
+  }
+  if (/CylinderGeometry/.test(src)) {
+    errors.push("area-limit: MagSafe/CylinderGeometry dock forbidden (nobase)");
+  }
+  if (/\/preview\/_app\/\?gbPost=/.test(src)) {
+    errors.push("area-limit: preview glass must be the post play.html, not the GitBrew app");
+  }
+  if (!/\/user-play\//.test(src) || !/play\.html/.test(src)) {
+    errors.push("area-limit: preview host must embed /user-play/<id>/play.html in the glass");
+  }
+  if (!/ds-made-by/.test(src) || !/sandbox-more/.test(src)) {
+    errors.push("area-limit: preview host must draw in-app tap-in chrome (made by + More)");
+  }
+  if (!/120cqw|PLAY_ISLAND_VW|120vw/.test(src)) {
+    errors.push("area-limit: preview play island must cap at 120vw");
+  }
+  if (/gb-glass-2d|pinGlass2d|cssMatrix3d/.test(src)) {
+    errors.push("area-limit: CSS3D glass only — no 2D overlay");
+  }
+  if (!/CSS3DObject/.test(src)) {
+    errors.push("area-limit: CSS3DObject(screenHost) is the glass");
+  }
+  return errors;
+}
+
+/** House artifact: coding agent must prove they read gitbrew-post skill (hard rules). */
+
+/** Live web /preview host marker (3js device + real app iframe). Not a JEV unit — separate check-preview. */
+export const PREVIEW_DEVICE_TAPIN_MARKER = "3js-device-css3d-drag";
+/** More → native GitHub sheet port: the hub passes the live github.com page through here. */
+export const PREVIEW_GH_PASSTHROUGH_PREFIX = "/preview/_gh/";
+/** Single source of truth for the sheet's polish/anchor pass (the app's native sheet). */
+export const PREVIEW_GH_POLISH_MM = "src-tauri/gen/apple/Sources/gitbrew/GitHubBrowser.mm";
+/** Deploy ZIP copy — Zeabur skips src-tauri; hub reads this if the repo path is missing. */
+export const PREVIEW_GH_SHIPPED_MM = "server/preview-host/native/GitHubBrowser.mm";
+export const PREVIEW_GH_POLISH_NAME = "kGBPolishAndAnchorJS";
+
+/**
+ * Decode `static NSString *const <name> = @"…" "…";` from Objective-C source (adjacent literals
+ * concatenated, C escapes decoded). Same decoder as server/preview-host/github-sheet.ts.
+ */
+export function extractObjcStringConst(src, name) {
+  const m = new RegExp(`static\\s+NSString\\s*\\*\\s*const\\s+${name}\\s*=`).exec(String(src || ""));
+  if (!m) throw new Error(`${name} not found`);
+  let i = m.index + m[0].length;
+  let out = "";
+  let literals = 0;
+  const n = src.length;
+  const esc = { '"': '"', "\\": "\\", "'": "'", n: "\n", t: "\t", r: "\r", "?": "?" };
+  for (;;) {
+    while (i < n) {
+      if (/\s/.test(src[i])) i++;
+      else if (src.startsWith("//", i)) { const e = src.indexOf("\n", i); i = e < 0 ? n : e + 1; }
+      else if (src.startsWith("/*", i)) { const e = src.indexOf("*/", i + 2); if (e < 0) throw new Error(`${name}: unterminated comment`); i = e + 2; }
+      else break;
+    }
+    if (i >= n) throw new Error(`${name}: unexpected end of source`);
+    if (src[i] === ";") break;
+    if (src[i] === "@" && src[i + 1] === '"') i++;
+    if (src[i] !== '"') throw new Error(`${name}: expected string literal at offset ${i}`);
+    i++;
+    for (;;) {
+      if (i >= n) throw new Error(`${name}: unterminated literal`);
+      const c = src[i];
+      if (c === '"') { i++; break; }
+      if (c === "\n") throw new Error(`${name}: newline inside literal`);
+      if (c === "\\") {
+        const e = src[i + 1];
+        if (!(e in esc)) throw new Error(`${name}: unsupported escape \\${e}`);
+        out += esc[e];
+        i += 2;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    literals++;
+  }
+  if (!literals || !out) throw new Error(`${name}: empty`);
+  return out;
+}
+
+/** Local GitHubBrowser.mm (repo checkout) for the byte-for-byte polish check, or "". */
+export function findGithubBrowserMm(explicit) {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const tries = [
+    explicit,
+    process.env.GITBREW_GITHUB_BROWSER_MM,
+    path.resolve(here, "../../../..", PREVIEW_GH_POLISH_MM),
+    path.resolve(process.cwd(), PREVIEW_GH_POLISH_MM),
+    path.resolve(process.cwd(), PREVIEW_GH_SHIPPED_MM),
+    path.resolve(here, "../../../..", PREVIEW_GH_SHIPPED_MM),
+  ].filter(Boolean);
+  for (const t of tries) {
+    try {
+      if (fs.statSync(t).isFile()) return t;
+    } catch {
+      /* next */
+    }
+  }
+  return "";
+}
+/** @deprecated full-bleed-only path — check-preview fails closed if this appears without device. */
+export const PREVIEW_FULLBLEED_MARKER = "preview-fullbleed-tapin-v1";
+
+/** Canonical public preview URL shape. */
+export function previewPostUrl(base, postId) {
+  const b = String(base || "https://gitbrew.ai").replace(/\/$/, "");
+  const id = String(postId || "").trim().toLowerCase();
+  return `${b}/preview/${id}`;
+}
+
+/**
+ * Machine-check live `/preview/<id>` HTML.
+ * GitBrew infra (not the agent's job): 3js device frame, tap-in chrome, cover slot, More GitHub sheet.
+ * Agent job: the play.html house **inside** the island.
+ * Does NOT change JEV 12/12 publish units — call via `protocol.mjs check-preview`.
+ * @param {{ html?: string, url?: string, appHtml?: string, hostJs?: string, sheetJs?: string, mmPath?: string }} opts
+ * @returns {Promise<{ ok: boolean, url?: string, marker: string, errors: string[], hints: Record<string, boolean> }>}
+ */
+export async function checkLivePreviewHost(opts = {}) {
+  const errors = [];
+  let html = opts.html != null ? String(opts.html) : "";
+  let url = opts.url ? String(opts.url) : "";
+  async function pull(target) {
+    const r = await fetch(target, {
+      headers: { Accept: "text/html, */*", "Cache-Control": "no-cache" },
+      redirect: "follow",
+    });
+    const text = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status} for ${target}`);
+    return text;
+  }
+  if (!html) {
+    if (!url) {
+      return {
+        ok: false,
+        marker: PREVIEW_DEVICE_TAPIN_MARKER,
+        errors: ["preview-host: need --url or html"],
+        hints: {},
+      };
+    }
+    try {
+      html = await pull(url);
+    } catch (e) {
+      return {
+        ok: false,
+        url,
+        marker: PREVIEW_DEVICE_TAPIN_MARKER,
+        errors: [`preview-host: fetch failed — ${e && e.message ? e.message : e}`],
+        hints: {},
+      };
+    }
+  }
+
+  if (url) {
+    try {
+      const host = new URL(url).hostname;
+      if (host === "gitbrew-sync.zeabur.app" || /\.zeabur\.app$/i.test(host)) {
+        errors.push("preview-host: public URL is https://gitbrew.ai/preview/<id> — not the zeabur.app host");
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const markerHit =
+    html.includes(`content="${PREVIEW_DEVICE_TAPIN_MARKER}"`) ||
+    html.includes(`data-gb-preview="${PREVIEW_DEVICE_TAPIN_MARKER}"`);
+  if (!markerHit) {
+    errors.push(`preview-host: missing marker ${PREVIEW_DEVICE_TAPIN_MARKER}`);
+  }
+  if (/preview-fullbleed-tapin-v1/.test(html) && !/3js-device|WebGLRenderer|GridHelper|#void|#css3d/i.test(html)) {
+    errors.push("preview-host: full-bleed-only host without device shell — restore 3js phone/iPad");
+  }
+  const needDevice = [
+    [/WebGLRenderer|THREE\.Scene|new THREE\./, "Three.js renderer/scene"],
+    [/GridHelper/, "product-void GridHelper"],
+    [/id="btn-phone"/, "phone toggle"],
+    [/id="btn-ipad"/, "iPad toggle"],
+    [/\/user-play\//, "post /user-play/ iframe"],
+    [/play\.html/, "play.html"],
+    [/ds-made-by/, "made-by chrome"],
+    [/sandbox-exit/, "sandbox-exit"],
+    [/sandbox-uploader/, "sandbox-uploader"],
+    [/sandbox-topic-title/, "sandbox-topic-title"],
+    [/sandbox-top-right/, "sandbox-top-right"],
+    [/sandbox-more/, "More"],
+    [/--safe-top|safeTop/, "safe-top chrome offset"],
+    [/120cqw|PLAY_ISLAND_VW|play-island/, "120vw play island"],
+    [/CSS3DObject/, "CSS3D glass"],
+    [/#css3d iframe \{ pointer-events: auto/, "CSS3D iframe draggable"],
+  ];
+  for (const [re, label] of needDevice) {
+    if (!re.test(html)) errors.push(`preview-host: missing ${label}`);
+  }
+  if (/CylinderGeometry/.test(html)) {
+    errors.push("preview-host: MagSafe/CylinderGeometry dock forbidden (nobase)");
+  }
+  const forbidden = [
+    [/\/preview\/_app\/\?gbPost=/, "GitBrew app iframe"],
+    [/Loading README…/, "self-drawn README"],
+    [/gb-glass-2d/, "2D overlay (not allowed)"],
+    [/pinGlass2d/, "2D pin (not allowed)"],
+  ];
+  for (const [re, label] of forbidden) {
+    if (re.test(html)) errors.push(`preview-host: hand-written chrome still present (${label})`);
+  }
+
+  let sheetJs = opts.sheetJs != null ? String(opts.sheetJs) : "";
+  if (!sheetJs && /\/preview\/_host\/sheet\.js/.test(html) && url) {
+    try {
+      const origin = new URL(url).origin;
+      sheetJs = await pull(`${origin}/preview/_host/sheet.js`);
+    } catch (e) {
+      errors.push(`preview-host: sheet script fetch failed — ${e && e.message ? e.message : e}`);
+    }
+  }
+  const sheetBlob = `${html}\n${sheetJs}`;
+  // More = the native GitHub sheet: the live github.com page through the hub pass-through.
+  const selfDrawn = [
+    [/\/api\/preview\/readme/, "/api/preview/readme"],
+    [/renderMarkdown|renderBlocks/, "markdown renderer"],
+    [/No README in this repository|Loading README…/, "self-drawn README states"],
+    [/gb-uisheet-body/, "gb-uisheet-body"],
+  ];
+  for (const [re, label] of selfDrawn) {
+    if (re.test(sheetBlob)) errors.push(`preview-host: old self-drawn README sheet still present (${label})`);
+  }
+  if (!sheetBlob.includes(PREVIEW_GH_PASSTHROUGH_PREFIX.replace(/\/$/, ""))) {
+    errors.push(`preview-host: More must open the live github.com page through ${PREVIEW_GH_PASSTHROUGH_PREFIX}`);
+  }
+  if (!/eval-polish/.test(sheetBlob)) {
+    errors.push("preview-host: GitHub sheet must run kGBPolishAndAnchorJS (eval-polish) like gbPolishAndAnchor");
+  }
+  if (!/github_open_sheet/.test(sheetBlob)) {
+    errors.push("preview-host: parent must listen for github_open_sheet");
+  }
+  if (!/gb-native-sheet-done|>Done</.test(sheetBlob)) {
+    errors.push("preview-host: UISheet needs a Done control");
+  }
+
+  function postIdOf() {
+    const fromPlay = html.match(/\/user-play\/([^/"']+)\/play\.html/);
+    if (fromPlay) return fromPlay[1];
+    const fromConst = html.match(/PREVIEW_POST_ID\s*=\s*"([^"]+)"/);
+    if (fromConst) return fromConst[1];
+    if (url) {
+      try {
+        const parts = new URL(url).pathname.split("/").filter(Boolean);
+        if (parts[0] === "preview" && parts[1] && parts[1] !== "_app" && parts[1] !== "_host") return parts[1];
+      } catch { /* ignore */ }
+    }
+    return "";
+  }
+
+  const id = postIdOf();
+  let origin = "";
+  if (url) {
+    try { origin = new URL(url).origin; } catch { origin = ""; }
+  }
+
+  // Live pass-through + polish source of truth (needs --url so the hub can be asked).
+  let ghPassthrough = null;
+  let polishMatchesMm = null;
+  let polishSource = "";
+  if (origin && id) {
+    let repoUrl = "";
+    try {
+      const r = await fetch(`${origin}/preview/${encodeURIComponent(id)}?format=json`, {
+        headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+      });
+      const j = r.ok ? await r.json() : null;
+      repoUrl = j && typeof j.githubUrl === "string" ? j.githubUrl : "";
+    } catch (e) {
+      errors.push(`preview-host: post json fetch failed — ${e && e.message ? e.message : e}`);
+    }
+    let served = null;
+    try {
+      const r = await fetch(`${origin}/preview/_gh-polish.json`, { headers: { "Cache-Control": "no-cache" } });
+      served = r.ok ? await r.json() : null;
+      if (!served || !served.ok || typeof served.js !== "string") {
+        errors.push(`preview-host: /preview/_gh-polish.json did not return ${PREVIEW_GH_POLISH_NAME} (HTTP ${r.status})`);
+        served = null;
+      } else {
+        polishSource = String(served.source || "");
+        if (polishSource !== PREVIEW_GH_POLISH_MM) {
+          errors.push(`preview-host: polish must be extracted from ${PREVIEW_GH_POLISH_MM}, hub says ${polishSource || "nothing"}`);
+        }
+        const sha = crypto.createHash("sha256").update(served.js, "utf8").digest("hex");
+        if (served.sha256 !== sha) errors.push("preview-host: served polish sha256 does not match its js");
+      }
+    } catch (e) {
+      errors.push(`preview-host: polish fetch failed — ${e && e.message ? e.message : e}`);
+    }
+    const mm = findGithubBrowserMm(opts.mmPath);
+    if (served && mm) {
+      try {
+        const raw = fs.readFileSync(mm);
+        const local = extractObjcStringConst(raw.toString("utf8"), PREVIEW_GH_POLISH_NAME);
+        polishMatchesMm = local === served.js;
+        if (!polishMatchesMm) {
+          errors.push(`preview-host: live ${PREVIEW_GH_POLISH_NAME} differs from ${mm} (not byte-for-byte)`);
+        }
+        // The hub also reports the sha256 of the whole .mm it read (repo path or the verbatim deploy copy).
+        if (served.mmSha256) {
+          const localMmSha = crypto.createHash("sha256").update(raw).digest("hex");
+          if (served.mmSha256 !== localMmSha) {
+            polishMatchesMm = false;
+            errors.push(`preview-host: hub's GitHubBrowser.mm (${served.shipped || "?"}) is not byte-for-byte ${mm}`);
+          }
+        }
+      } catch (e) {
+        errors.push(`preview-host: could not read ${PREVIEW_GH_POLISH_NAME} from ${mm} — ${e && e.message ? e.message : e}`);
+      }
+    }
+    let slug = null;
+    try {
+      const u = new URL(repoUrl);
+      const segs = u.pathname.split("/").filter(Boolean);
+      if (u.hostname.toLowerCase() === "github.com" && segs.length >= 2) slug = `${segs[0]}/${segs[1]}`;
+    } catch {
+      slug = null;
+    }
+    if (!slug) {
+      errors.push("preview-host: post has no github.com repo, so More cannot open the GitHub sheet");
+    } else {
+      try {
+        const passUrl = `${origin}${PREVIEW_GH_PASSTHROUGH_PREFIX}${slug}`;
+        const r = await fetch(passUrl, { headers: { Accept: "text/html", "Cache-Control": "no-cache" } });
+        const body = await r.text();
+        const xfo = r.headers.get("x-frame-options");
+        const csp = String(r.headers.get("content-security-policy") || "");
+        const problems = [];
+        if (r.status !== 200) problems.push(`HTTP ${r.status}`);
+        if (r.headers.get("x-gb-sheet") !== "passthrough") problems.push("x-gb-sheet != passthrough");
+        // github.com's own `DENY` must be gone. The gitbrew.ai front adds `SAMEORIGIN` to every response;
+        // that still lets the same-origin preview page frame the pass-through, so it is allowed.
+        if (xfo && !/^\s*sameorigin\s*$/i.test(xfo)) problems.push(`x-frame-options ${xfo}`);
+        if (!/\bsandbox\b/.test(csp) || /frame-ancestors 'none'/.test(csp)) problems.push(`csp "${csp}"`);
+        if (!/^https:\/\/github\.com\//.test(String(r.headers.get("x-gb-sheet-upstream") || ""))) problems.push("upstream is not github.com");
+        if (!/<base href="https:\/\/github\.com\//i.test(body)) problems.push("no <base href=https://github.com/>");
+        if (!/github\.githubassets\.com/.test(body)) problems.push("not GitHub's own page (no githubassets)");
+        if (!/markdown-body/.test(body)) problems.push("no rendered README (markdown-body)");
+        if (!/js-header-wrapper|repository-content|repository-container-header|HeaderMenu/.test(body)) {
+          problems.push("no GitHub repo chrome (README-only fragment)");
+        }
+        if (/<script[^>]+src=["']https:\/\/github\.githubassets\.com/i.test(body)) {
+          problems.push("GitHub boot scripts still present (would hydrate away SSR chrome)");
+        }
+        if (!/window\.__gbSheet=/.test(body) || !/eval-polish/.test(body)) problems.push("sheet bridge not injected");
+        if (served && r.headers.get("x-gb-sheet-polish-sha256") !== served.sha256) problems.push("page polish sha differs from /preview/_gh-polish.json");
+        ghPassthrough = problems.length === 0;
+        if (problems.length) errors.push(`preview-host: ${passUrl} is not the live github.com pass-through — ${problems.join("; ")}`);
+      } catch (e) {
+        ghPassthrough = false;
+        errors.push(`preview-host: GitHub pass-through fetch failed — ${e && e.message ? e.message : e}`);
+      }
+    }
+  }
+
+  const hints = {
+    marker: markerHit,
+    device: /WebGLRenderer|GridHelper|3js-device/i.test(html),
+    playIframe: /\/user-play\//.test(html) && /play\.html/.test(html),
+    noAppIframe: !/\/preview\/_app\/\?gbPost=/.test(html),
+    noHandChrome: !forbidden.some(([re]) => re.test(html)),
+    moreOpensGithubPassthrough: sheetBlob.includes("/preview/_gh") && (url ? ghPassthrough === true : true),
+    ghPassthroughLive: ghPassthrough,
+    noSelfDrawnReadme: !selfDrawn.some(([re]) => re.test(sheetBlob)),
+    polishFromMm: polishSource === PREVIEW_GH_POLISH_MM || null,
+    polishMatchesMm,
+    noCylinder: !/CylinderGeometry/.test(html),
+    noPlayIsland: !/play-island/i.test(html),
+  };
+  return {
+    ok: errors.length === 0,
+    url: url || undefined,
+    marker: PREVIEW_DEVICE_TAPIN_MARKER,
+    errors,
+    hints,
+  };
+}
+
+export const SKILL_PROOF_FILE = "SKILL_PROOF.md";
+export const SKILL_PROOF_MIN_CHARS = 120;
+
+/**
+ * Fail closed: SKILL_PROOF.md must exist, be non-empty, and cite hard skill rules
+ * (ready ≤2s, local vendor, ratio/120vw island, composition).
+ */
+export function validateSkillProofContent(raw) {
+  const errors = [];
+  const text = String(raw ?? "").trim();
+  if (!text) {
+    errors.push(
+      `skill-proof missing: ${SKILL_PROOF_FILE} required — coding agent must read gitbrew-post SKILL.md and write a short proof`,
+    );
+    return errors;
+  }
+  if (text.replace(/\s+/g, "").length < SKILL_PROOF_MIN_CHARS) {
+    errors.push(
+      `skill-proof empty: ${SKILL_PROOF_FILE} too thin (min ${SKILL_PROOF_MIN_CHARS} non-whitespace chars) — prove you read the skill`,
+    );
+  }
+  const lower = text.toLowerCase();
+  const need = [
+    {
+      ok: /ready|playable-ready|2000|_ready/.test(lower),
+      err: "skill-proof incomplete: must cite ready hard rule (ready ≤2000ms / /sandbox/_ready.js / playable-ready)",
+    },
+    {
+      ok: /vendor|local only|no https|remote/.test(lower),
+      err: "skill-proof incomplete: must cite local-vendor hard rule (relative ./vendor, no remote css/js/font)",
+    },
+    {
+      ok: /120vw|play_island_vw|play-island|island|max-height:\s*120/.test(lower) || (/ratio/.test(lower) && /120|1\.2/.test(lower)),
+      err: "skill-proof incomplete: must cite ratio/island hard rule (phone max-height 120vw / PLAY_ISLAND_VW=1.2)",
+    },
+    {
+      ok: /composition|viewport-fit|overflow:\s*hidden|dock/.test(lower),
+      err: "skill-proof incomplete: must cite composition hard rule (viewport-fit=cover / overflow:hidden / dock sibling)",
+    },
+  ];
+  for (const n of need) {
+    if (!n.ok) errors.push(n.err);
+  }
+  return errors;
+}
+
+export function validateSkillProofFile(dir) {
+  const p = path.join(dir, SKILL_PROOF_FILE);
+  if (!fs.existsSync(p)) {
+    return [
+      `skill-proof missing: ${SKILL_PROOF_FILE} required — coding agent must read gitbrew-post SKILL.md and write a short proof`,
+    ];
+  }
+  return validateSkillProofContent(fs.readFileSync(p, "utf8"));
+}
+
+/**
+ * Machine-enforce skill Ratio / 120vw island (PLAY_ISLAND_VW).
+ * Pass measured play-island CSS px (host iframe box). Full-glass fill fails.
+ */
+export function pushPlayIslandGate(input, aspect, errors) {
+  const w = input?.islandWidth ?? input?.islandW;
+  const h = input?.islandHeight ?? input?.islandH;
+  if (w == null || h == null) return;
+  const r = checkPlayIslandSize({
+    width: w,
+    height: h,
+    glassHeight: input?.glassHeight ?? input?.glassH,
+    aspect,
+  });
+  if (!r.ok) errors.push(r.error);
+}
+
+
 
 const DEMOLISH = [
   /showRunner\s*\(/,
   /width:\s*100%\s*!important/,
   /function\s+gbRebuildHud/,
-  /args\.seg\s*=\s*\d+/,
-  /\.filter\s*=\s*function\s*\(\)\s*\{\s*\}/,
 ];
 
 const REMOTE_FONT = /fonts\.googleapis|fonts\.gstatic|use\.typekit|kit\.fontawesome/i;
@@ -166,20 +701,6 @@ function pushComposition(html, joined, _aspect, errors) {
   }
 }
 
-function pushSlowReady(html, joined, errors) {
-  const hasRoot = /id\s*=\s*["']root["']/i.test(joined) || /getElementById\(\s*["']root["']\s*\)/.test(joined);
-  if (!hasRoot) return;
-  const hasProbe =
-    /children\.length\s*>\s*0/.test(joined) ||
-    /gb-winxp-ready/.test(joined) ||
-    /\/sandbox\/_ready(?:\.v\d+)?\.js/.test(html);
-  if (!hasProbe) {
-    errors.push("ready-hook: #root posts must include /sandbox/_ready.js (cloud gate measures ready ≤ MAX_READY_MS)");
-  }
-}
-
-
-
 function pushRemote(html, errors) {
   const links = [...html.matchAll(/<link\b[^>]*>/gi)];
   if (links.some((m) => /stylesheet/i.test(m[0]) && /href=["']https?:/i.test(m[0]))) {
@@ -192,31 +713,6 @@ function pushRemote(html, errors) {
   }
   if (REMOTE_FONT.test(html)) errors.push("remote font");
   if (REMOTE_WIDGET.test(html)) errors.push("remote widget");
-}
-
-/**
- * A post IS a repo's playable artifact: the post id is the repo name,
- * slugified. A manifest that names a different repo is a provenance lie
- * (wrong README, wrong link) and is rejected. Keep in sync with
- * postSlugFromRepoName in server/routers.ts and Posts.tsx.
- */
-export function postSlugFromRepoName(name) {
-  return String(name ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32)
-    .replace(/-+$/, "");
-}
-
-function repoNameOf(repo) {
-  const raw = String(repo ?? "")
-    .trim()
-    .replace(/^https?:\/\/(github|gitlab)\.com\//i, "")
-    .replace(/\.git$/, "")
-    .replace(/\/+$/, "");
-  const parts = raw.split("/");
-  return parts.length >= 2 ? parts[parts.length - 1] : "";
 }
 
 export function validateUserPostFiles(input) {
@@ -286,7 +782,6 @@ export function validateUserPostFiles(input) {
     const joined = [html, ...files.map((f) => f.content)].join("\n");
     pushRatio(joined, html, aspect, errors);
     pushComposition(html, joined, aspect, errors);
-    pushSlowReady(html, joined, errors);
     if (/(?:#scene|canvas)\s*\{[^}]{0,120}display:\s*none/i.test(html)) {
       errors.push("hide-stage");
     }
@@ -320,8 +815,20 @@ export function validateUserPostFiles(input) {
     errors.push(`intro must be ≤${MAX_INTRO_CHARS} per language`);
   }
 
+  const aspectForIsland = parseAspect(input.aspect);
+  pushPlayIslandGate(input, aspectForIsland, errors);
+  if (input.skillProofContent != null || input.requireSkillProof) {
+    for (const e of validateSkillProofContent(input.skillProofContent)) errors.push(e);
+  }
+
   const unique = [...new Set(errors)];
-  return { ok: unique.length === 0, id, pasted: unique.length === 0, errors: unique };
+  return {
+    ok: unique.length === 0,
+    id,
+    pasted: unique.length === 0,
+    errors: unique,
+    playIslandVw: PLAY_ISLAND_VW,
+  };
 }
 
 export function validateUserPost(dir) {
@@ -341,6 +848,9 @@ export function validateUserPost(dir) {
     path: rel,
     content: fs.existsSync(path.join(dir, rel)) ? fs.readFileSync(path.join(dir, rel), "utf8") : "",
   }));
+  const islandWidth = Number(arg("island-w") || "") || undefined;
+  const islandHeight = Number(arg("island-h") || "") || undefined;
+  const glassHeight = Number(arg("glass-h") || "") || undefined;
   const checked = validateUserPostFiles({
     id: manifest.id,
     title: manifest.title,
@@ -349,21 +859,31 @@ export function validateUserPost(dir) {
     playHtmlContent: fs.existsSync(playPath) ? fs.readFileSync(playPath, "utf8") : "",
     officialFiles,
     aspect: manifest.aspect,
+    islandWidth,
+    islandHeight,
+    glassHeight,
+    // On CLI `check`, skill proof is mandatory (skill is a hard request).
+    requireSkillProof: process.argv[2] === "check",
+    skillProofContent:
+      fs.existsSync(path.join(dir, SKILL_PROOF_FILE))
+        ? fs.readFileSync(path.join(dir, SKILL_PROOF_FILE), "utf8")
+        : process.argv[2] === "check"
+          ? ""
+          : undefined,
   });
   const checking = process.argv[2] === "check";
   const hasLoop = fs.existsSync(path.join(dir, "cover.mp4"));
   const hasStill = ["cover.webp", "cover.png"].some((n) => fs.existsSync(path.join(dir, n)));
   const coverErrors = checking || hasLoop || hasStill ? validateCoverFiles(dir) : [];
   const errors = [...checked.errors, ...coverErrors];
-  const repo = manifest.githubRepo ?? manifest.gitlabRepo;
-  if (repo) {
-    const want = postSlugFromRepoName(repoNameOf(repo));
-    if (want && manifest.id !== want) {
-      errors.push(`post id must be the repo name ("${want}")`);
-    }
-  }
   const unique = [...new Set(errors)];
-  return { ok: unique.length === 0, id: checked.id, pasted: unique.length === 0, errors: unique };
+  return {
+    ok: unique.length === 0,
+    id: checked.id,
+    pasted: unique.length === 0,
+    errors: unique,
+    playIslandVw: PLAY_ISLAND_VW,
+  };
 }
 
 function probeVideo(file) {
@@ -427,13 +947,59 @@ function ranAsCli() {
 
 function cli() {
   const cmd = process.argv[2];
+  if (cmd === "check-island") {
+    const w = Number(arg("w") || arg("island-w"));
+    const h = Number(arg("h") || arg("island-h"));
+    const glassH = arg("glass-h") !== "" ? Number(arg("glass-h")) : undefined;
+    const aspect = arg("aspect") || "phone";
+    if (!(w > 0) || !(h >= 0)) {
+      console.error("usage: node protocol.mjs check-island --w 402 --h 482 [--glass-h 874] [--aspect phone]");
+      process.exit(2);
+    }
+    const r = checkPlayIslandSize({ width: w, height: h, glassHeight: glassH, aspect });
+    const out = {
+      ok: r.ok,
+      playIslandVw: PLAY_ISLAND_VW,
+      maxHeight: r.maxHeight,
+      errors: r.ok ? [] : [r.error],
+    };
+    console.log(JSON.stringify(out, null, 2));
+    process.exit(r.ok ? 0 : 1);
+  }
+  if (cmd === "check-preview") {
+    const htmlFile = arg("html-file");
+    const url =
+      arg("url") ||
+      (arg("post-id") || arg("id")
+        ? previewPostUrl(arg("base") || arg("gitbrew-url") || "https://gitbrew.ai", arg("post-id") || arg("id"))
+        : "");
+    if (!url && !htmlFile) {
+      console.error("usage: node protocol.mjs check-preview --url https://gitbrew.ai/preview/<postId>");
+      console.error("       node protocol.mjs check-preview --post-id u-login-slug [--base https://gitbrew.ai]");
+      console.error("       node protocol.mjs check-preview --html-file preview.html [--app-html index.html --host-js tauri-host.js --sheet-js sheet.js]");
+      process.exit(2);
+    }
+    const opts = { url };
+    if (htmlFile) opts.html = fs.readFileSync(htmlFile, "utf8");
+    if (arg("app-html")) opts.appHtml = fs.readFileSync(arg("app-html"), "utf8");
+    if (arg("host-js")) opts.hostJs = fs.readFileSync(arg("host-js"), "utf8");
+    if (arg("sheet-js")) opts.sheetJs = fs.readFileSync(arg("sheet-js"), "utf8");
+    if (arg("mm")) opts.mmPath = arg("mm");
+    checkLivePreviewHost(opts).then((r) => {
+      console.log(JSON.stringify(r, null, 2));
+      process.exit(r.ok ? 0 : 1);
+    });
+    return;
+  }
   if (cmd !== "check") {
-    console.error("usage: node protocol.mjs check --dir ./the-post-folder");
+    console.error("usage: node protocol.mjs check --dir ./the-post-folder [--island-w 402 --island-h 482 --glass-h 874]");
+    console.error("       node protocol.mjs check-island --w 402 --h 482 [--glass-h 874]");
+    console.error("       node protocol.mjs check-preview --url https://gitbrew.ai/preview/<postId>");
     process.exit(2);
   }
   const dir = arg("dir") || process.argv[3];
   if (!dir) {
-    console.error("usage: node protocol.mjs check --dir ./the-post-folder");
+    console.error("usage: node protocol.mjs check --dir ./the-post-folder [--island-w 402 --island-h 482 --glass-h 874]");
     process.exit(2);
   }
   const r = validateUserPost(dir);
