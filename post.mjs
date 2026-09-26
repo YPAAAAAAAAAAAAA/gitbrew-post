@@ -53,7 +53,7 @@ if (isLoopback(url) && process.env.GITBREW_ALLOW_LOCAL !== "1") {
 if (isPackHost(url)) {
   die("That URL is the skill pack, not GitBrew. Pass --url of the GitBrew that has /api/trpc.");
 }
-if (!token) die("Set GITBREW_TOKEN (from gitbrew.ai → Me → Generate token) or GITHUB_TOKEN.");
+if (!token) die("Set GITBREW_TOKEN (from https://gitbrew.ai → Me → Generate token) or GITHUB_TOKEN.");
 
 async function gitbrewFetch(href, init) {
   const ac = new AbortController();
